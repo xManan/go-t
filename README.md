@@ -1,7 +1,5 @@
 # go-t
 
-## Demo
-
 ![Typing Speed Test Demo](demo.gif)
 
 ## Overview

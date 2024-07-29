@@ -7,6 +7,7 @@ import (
 	"os"
 	"runtime"
 	"time"
+	_ "time"
 
 	"github.com/pkg/term/termios"
 	"golang.org/x/sys/unix"
@@ -30,10 +31,13 @@ const (
 	MOVE_CURSOR_BACK    = "\x1B[D"
 	SET_COLOR_RED       = "\x1B[0;31m"
 	SET_COLOR_GREEN     = "\x1B[0;32m"
+	SET_COLOR_SEA_GREEN = "\x1B[0;36m"
+	SET_COLOR_BLUE      = "\x1B[0;34m"
 	RESET_COLOR_STYLE   = "\x1B[0m"
 	SET_STYLE_UNDERLINE = "\x1B[4m"
 
 	CTRL_C  = 3
+	CTRL_R  = 18
 	BACKSPC = 127
 	ENTER   = 13
 	NIL     = 0
@@ -49,8 +53,9 @@ type Cursor struct {
 }
 
 type Char struct {
-	value rune
-	inp   rune
+	value  rune
+	inp    rune
+	isLast bool
 }
 
 type Line []Char
@@ -73,8 +78,18 @@ type Window struct {
 	showInp bool
 }
 
+var windowWidth int
+var windowHeight int
+
 func main() {
-	err := enableRawMode()
+	file, err := os.OpenFile("application.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
+	if err != nil {
+		log.Fatalf("error opening log file: %v", err)
+	}
+	defer file.Close()
+	log.SetOutput(file)
+
+	err = enableRawMode()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -89,14 +104,15 @@ func main() {
 		}
 	}()
 
-	windowWidth, windowHeight, err := term.GetSize(int(os.Stdout.Fd()))
+	windowWidth, windowHeight, err = term.GetSize(int(os.Stdout.Fd()))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error getting terminal size: %v\n", err)
 		return
 	}
 	windowX, windowY := windowWidth/2-TEXTBOX_WIDTH/2, windowHeight/2-TEXTBOX_HEIGHT/2
 
-	text := "The quick brown fox jumps over the lazy dog The quick brown fox jumps over the lazy dog The quick brown fox jumps over the lazy dog The quick brown fox jumps over the lazy dog The quick brown fox jumps over the lazy dog The quick brown fox jumps over the lazy dog"
+	text := "the morning sun shines bright and warms the earth as people start their day with simple tasks some walk their dogs while others enjoy a cup of coffee and read the news the city wakes up slowly with the sound of cars and people talking the streets fill with life and energy as everyone goes about their routines meeting friends and working hard each day brings new chances to learn and enjoy the little things that make life special"
+	wordCount := 0
 	doc := stringToDocument(text, TEXTBOX_WIDTH, TEXTBOX_HEIGHT)
 
 	window := NewWindow(windowX, windowY, TEXTBOX_WIDTH, TEXTBOX_HEIGHT, doc)
@@ -105,13 +121,70 @@ func main() {
 	window.PrintCurrentPage()
 	fmt.Print(RESET_DIM_MODE)
 
+	fmt.Printf("\x1B[%d;%dH", windowHeight/2+TEXTBOX_HEIGHT/2+12, windowWidth/2-18)
+	fmt.Print(SET_COLOR_SEA_GREEN + "Ctrl-c" + RESET_COLOR_STYLE + " - quit" + SET_COLOR_SEA_GREEN + "      Ctrl-r" + RESET_COLOR_STYLE + " - restart")
+	window.SetCursor(0, 0)
+
 	isTyping := false
+	isFinished := false
+	var wpm float64
 	var startTime time.Time
-	var endTime time.Time
 	for inp := userInp(); inp != CTRL_C; inp = userInp() {
+		if isFinished {
+			fmt.Print(CLEAR_SCREEN)
+			fmt.Printf("\x1B[%d;%dH", windowHeight/2, windowWidth/2-5)
+			fmt.Printf(SET_COLOR_BLUE+"WPM"+RESET_COLOR_STYLE+": %.2f", wpm)
+			fmt.Printf("\x1B[%d;%dH", windowHeight/2+TEXTBOX_HEIGHT/2+12, windowWidth/2-18)
+			fmt.Print(SET_COLOR_SEA_GREEN + "Ctrl-c" + RESET_COLOR_STYLE + " - quit" + SET_COLOR_SEA_GREEN + "      Ctrl-r" + RESET_COLOR_STYLE + " - restart")
+			switch inp {
+			case CTRL_R:
+				isTyping = true
+				isFinished = false
+				window.cursor = Cursor{x: 0, y: 0}
+				window.doc.currentPage = 0
+				wordCount = 0
+				for i, page := range window.doc.pages {
+					for j, line := range page {
+						for k := range line {
+							window.doc.pages[i][j][k].inp = rune('\000')
+						}
+					}
+				}
+				fmt.Print(SET_DIM_MODE)
+				window.PrintCurrentPage()
+				fmt.Print(RESET_DIM_MODE)
+
+				fmt.Printf("\x1B[%d;%dH", windowHeight/2+TEXTBOX_HEIGHT/2+12, windowWidth/2-18)
+				fmt.Print(SET_COLOR_SEA_GREEN + "Ctrl-c" + RESET_COLOR_STYLE + " - quit" + SET_COLOR_SEA_GREEN + "      Ctrl-r" + RESET_COLOR_STYLE + " - restart")
+				window.SetCursor(0, 0)
+			case NIL:
+			default:
+			}
+			continue
+		}
 		switch inp {
 		case ENTER:
 		case NIL:
+		case CTRL_R:
+			isTyping = true
+			isFinished = false
+			wordCount = 0
+			window.cursor = Cursor{x: 0, y: 0}
+			window.doc.currentPage = 0
+			for i, page := range window.doc.pages {
+				for j, line := range page {
+					for k := range line {
+						window.doc.pages[i][j][k].inp = rune('\000')
+					}
+				}
+			}
+			fmt.Print(SET_DIM_MODE)
+			window.PrintCurrentPage()
+			fmt.Print(RESET_DIM_MODE)
+
+			fmt.Printf("\x1B[%d;%dH", windowHeight/2+TEXTBOX_HEIGHT/2+12, windowWidth/2-18)
+			fmt.Print(SET_COLOR_SEA_GREEN + "Ctrl-c" + RESET_COLOR_STYLE + " - quit" + SET_COLOR_SEA_GREEN + "      Ctrl-r" + RESET_COLOR_STYLE + " - restart")
+			window.SetCursor(0, 0)
 		case BACKSPC:
 			window.SetInpAtCursor(rune(0))
 			window.CursorSub()
@@ -122,7 +195,32 @@ func main() {
 				startTime = time.Now()
 			}
 			window.SetInpAtCursor(rune(inp))
-			cursorVal := window.RuneAtCursor()
+			cursorChar := window.CharAtCursor()
+			cursorVal := cursorChar.value
+			log.Printf("%d - %c", cursorVal, cursorVal)
+			if cursorChar.isLast {
+				isCorrect := true
+				for i, page := range window.doc.pages {
+					for j, line := range page {
+						for k := range line {
+							if window.doc.pages[i][j][k].value != ' ' && window.doc.pages[i][j][k].value != window.doc.pages[i][j][k].inp {
+								isCorrect = false
+							}
+							if window.doc.pages[i][j][k].value == ' ' || window.doc.pages[i][j][k].value == '\000' {
+								if isCorrect {
+									wordCount++
+								}
+								isCorrect = true
+							}
+						}
+					}
+				}
+				timeTaken := time.Now().Sub(startTime).Minutes()
+				wpm = float64(wordCount) / timeTaken
+				isTyping = false
+				isFinished = true
+				continue
+			}
 			var showVal rune
 			if window.showInp {
 				showVal = rune(inp)
@@ -132,7 +230,7 @@ func main() {
 			if rune(inp) == cursorVal {
 				fmt.Printf(SET_COLOR_GREEN+"%c"+RESET_COLOR_STYLE, showVal)
 			} else {
-				if inp == SPACE && window.showInp {
+				if cursorVal == SPACE {
 					fmt.Printf(SET_COLOR_RED+SET_STYLE_UNDERLINE+"%c"+RESET_COLOR_STYLE, showVal)
 				} else {
 					fmt.Printf(SET_COLOR_RED+"%c"+RESET_COLOR_STYLE, showVal)
@@ -173,7 +271,7 @@ func (w *Window) PrintPage(pageNumber int) {
 				if c.value == c.inp {
 					fmt.Printf(SET_COLOR_GREEN+"%c"+RESET_COLOR_STYLE, char)
 				} else {
-					if c.inp == SPACE && w.showInp {
+					if c.value == SPACE {
 						fmt.Printf(SET_COLOR_RED+SET_STYLE_UNDERLINE+"%c"+RESET_COLOR_STYLE, char)
 					} else {
 						fmt.Printf(SET_COLOR_RED+"%c"+RESET_COLOR_STYLE, char)
@@ -191,6 +289,10 @@ func (w *Window) CurrentPage() Page {
 
 func (w *Window) RuneAtCursor() rune {
 	return w.doc.pages[w.doc.currentPage][w.cursor.y][w.cursor.x].value
+}
+
+func (w *Window) CharAtCursor() Char {
+	return w.doc.pages[w.doc.currentPage][w.cursor.y][w.cursor.x]
 }
 
 func (w *Window) SetInpAtCursor(inp rune) {
@@ -225,6 +327,9 @@ func (w *Window) CursorAdd() {
 				fmt.Print(SET_DIM_MODE)
 				w.PrintCurrentPage()
 				fmt.Print(RESET_DIM_MODE)
+				fmt.Printf("\x1B[%d;%dH", windowHeight/2+TEXTBOX_HEIGHT/2+12, windowWidth/2-18)
+				fmt.Print(SET_COLOR_SEA_GREEN + "Ctrl-c" + RESET_COLOR_STYLE + " - quit" + SET_COLOR_SEA_GREEN + "      Ctrl-r" + RESET_COLOR_STYLE + " - restart")
+				w.SetCursor(0, 0)
 			}
 		}
 	}
@@ -241,6 +346,9 @@ func (w *Window) CursorSub() {
 			if w.doc.currentPage > 0 {
 				w.doc.currentPage--
 				w.PrintCurrentPage()
+				fmt.Printf("\x1B[%d;%dH", windowHeight/2+TEXTBOX_HEIGHT/2+12, windowWidth/2-18)
+				fmt.Print(SET_COLOR_SEA_GREEN + "Ctrl-c" + RESET_COLOR_STYLE + " - quit" + SET_COLOR_SEA_GREEN + "      Ctrl-r" + RESET_COLOR_STYLE + " - restart")
+				w.SetCursor(0, 0)
 				w.cursor.y = len(w.doc.pages[w.doc.currentPage]) - 1
 				w.cursor.x = len(w.doc.pages[w.doc.currentPage][w.cursor.y]) - 1
 			} else {
@@ -352,7 +460,11 @@ func stringToDocument(str string, cols int, rows int) Document {
 		}
 	}
 	for x := wordStart; x < len(str); x++ {
-		line = append(line, Char{value: rune(str[x])})
+		if x == len(str) - 1 {
+			line = append(line, Char{value: rune(str[x]), isLast: true})
+		} else {
+			line = append(line, Char{value: rune(str[x])})
+		}
 	}
 	doc.wordCount++
 
